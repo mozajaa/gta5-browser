@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Mini GTA 3D</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --panel: rgba(0,0,0,0.3);
+      --text: #f5f5f5;
+      --hud: #ffd166;
+      --danger: #ff5d5d;
+      --road: #2d2d2d;
+      --grass: #234725;
+    }
+
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: var(--bg);
+      overflow: hidden;
+      font-family: Arial, Helvetica, sans-serif;
+      color: var(--text);
+    }
+
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      background: linear-gradient(#6fb8ff 0%, #3f7fd6 30%, #203b57 100%);
+      image-rendering: auto;
+    }
+
+    #hud {
+      position: fixed;
+      top: 14px;
+      left: 14px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: var(--panel);
+      font-size: 13px;
+      line-height: 1.5;
+      user-select: none;
+      pointer-events: none;
+    }
+
+    #title {
+      position: fixed;
+      left: 50%;
+      top: 18px;
+      transform: translateX(-50%);
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: 2px;
+      color: var(--hud);
+      text-shadow: 0 0 12px rgba(255, 209, 102, 0.8);
+      user-select: none;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="title">MINI GTA 3D</div>
+  <div id="hud">
+    WASD / Arrows = Drive<br>
+    Shift = Nitro<br>
+    Space = Brake<br>
+    C = Chaos<br>
+    R = Reset
+  </div>
+  <canvas id="game"></canvas>
+
+  <script>
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+
+    const world = {
+      width: 220,
+      height: 220,
+      horizon: 0.32,
+      roadHalf: 18,
+      laneCount: 3
+    };
+
+    const keys = {};
+    const pickups = [];
+    const particles = [];
+    const enemies = [];
+
+    const player = {
+      x: 20,
+      y: 170,
+      z: 0,
+      angle: 0,
+      speed: 0,
+      maxSpeed: 28,
+      acc: 3.4,
+      drag: 1.5,
+      health: 100,
+      wanted: 0,
+      score: 0,
+      nitro: 0,
+      flash: 0,
+      size: 2.4
+    };
+
+    function clamp(v, a, b) {
+      return Math.min(Math.max(v, a), b);
+    }
+
+    function rand(min, max) {
+      return min + Math.random() * (max - min);
+    }
+
+    function resize() {
+      canvas.width = innerWidth * devicePixelRatio;
+      canvas.height = innerHeight * devicePixelRatio;
+      ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    function key(name, down) {
+      keys[name] = down;
+    }
+
+    window.addEventListener('keydown', e => {
+      const k = e.key.toLowerCase();
+      key(k, true);
+      if (k === 'r') reset();
+      if (k === 'c') chaos();
+    });
+    window.addEventListener('keyup', e => {
+      const k = e.key.toLowerCase();
+      key(k, false);
+    });
+
+    function reset() {
+      player.x = 20;
+      player.y = 170;
+      player.z = 0;
+      player.angle = 0;
+      player.speed = 0;
+      player.health = 100;
+      player.wanted = 0;
+      player.score = 0;
+      player.nitro = 0;
+      player.flash = 0;
+      pickups.length = 0;
+      particles.length = 0;
+      enemies.length = 0;
+      for (let i = 0; i < 6; i++) {
+        pickups.push({
+          x: rand(20, 180),
+          y: rand(10, 190),
+          r: rand(1.8, 2.6),
+          mode: i % 2 ? 'cash' : 'repair',
+          pulse: rand(0, Math.PI * 2)
+        });
+      }
+      for (let i = 0; i < 4; i++) {
+        enemies.push({
+          x: rand(15, 195),
+          y: rand(20, 190),
+          z: rand(0, 6),
+          angle: rand(0, Math.PI * 2),
+          speed: rand(8, 12),
+          color: ['#5bd1ff', '#ff7070', '#9bf7b0'][i % 3]
+        });
+      }
+    }
+    reset();
+
+    function chaos() {
+      for (let i = 0; i < 25; i++) {
+        particles.push({
+          x: player.x + rand(-10, 10),
+          y: player.y + rand(-10, 10),
+          vx: rand(-10, 10),
+          vy: rand(-10, 10),
+          life: rand(20, 40),
+          size: rand(2, 5),
+          color: i % 2 ? '#ffb703' : '#ff5d5d'
+        });
+      }
+    }
+
+    function proj(x, y, z) {
+      const camX = player.x;
+      const camY = player.y;
+      const camA = player.angle;
+      const dx = x - camX;
+      const dy = y - camY;
+
+      const rx = dx * Math.cos(-camA) - dy * Math.sin(-camA);
+      const ry = dx * Math.sin(-camA) + dy * Math.cos(-camA);
+
+      const depth = ry + 20;
+      const scale = 700 / (depth + 20);
+      const sx = innerWidth / 2 + rx * scale;
+      const sy = innerHeight * world.horizon + (z - 0) * scale * 0.7;
+      return { x: sx, y: sy, scale, depth };
+    }
+
+    function updatePlayer() {
+      const left = keys.a || keys.arrowleft;
+      const right = keys.d || keys.arrowright;
+      const forward = keys.w || keys.arrowup;
+      const back = keys.s || keys.arrowdown;
+      const brake = keys[' '];
+      const boost = keys.shift;
+
+      let turn = 0;
+      if (left) turn -= 1;
+      if (right) turn += 1;
+
+      player.angle += turn * 0.045 * (0.5 + Math.abs(player.speed) / 18);
+
+      let throttle = 0;
+      if (forward) throttle += 1;
+      if (back) throttle -= 0.7;
+
+      if (boost) {
+        player.nitro = 1;
+      } else {
+        player.nitro = 0;
+      }
+
+      const accel = player.acc * (boost ? 1.8 : 1);
+      player.speed += throttle * accel;
+      if (!forward && !back) {
+        player.speed *= (brake ? 0.75 : 0.93);
+      }
+      if (brake) player.speed *= 0.82;
+
+      player.speed = clamp(player.speed, -10, player.maxSpeed + player.nitro * 12);
+      player.x += Math.cos(player.angle) * player.speed * 0.08;
+      player.y += Math.sin(player.angle) * player.speed * 0.08;
+      player.x = clamp(player.x, 0, world.width);
+      player.y = clamp(player.y, 0, world.height);
+      player.flash = Math.max(0, player.flash - 0.04);
+    }
+
+    function updateEnemies() {
+      for (const e of enemies) {
+        const dx = player.x - e.x;
+        const dy = player.y - e.y;
+        const dist = Math.hypot(dx, dy) || 1;
+
+        if (dist < 30) {
+          e.angle = Math.atan2(dy, dx);
+          e.speed = 9;
+        } else {
+          e.angle += Math.sin(performance.now() * 0.0006 + e.x) * 0.03;
+          e.speed = 6;
+        }
+
+        e.x += Math.cos(e.angle) * e.speed * 0.06;
+        e.y += Math.sin(e.angle) * e.speed * 0.06;
+        e.x = clamp(e.x, 0, world.width);
+        e.y = clamp(e.y, 0, world.height);
+
+        if (dist < 4) {
+          player.health -= 0.8;
+          player.flash = 1;
+          e.x += rand(-4, 4);
+          e.y += rand(-4, 4);
+        }
+      }
+    }
+
+    function updatePickups() {
+      for (const p of pickups) {
+        p.pulse += 0.08;
+        const d = Math.hypot(player.x - p.x, player.y - p.y);
+        if (d < 4.5) {
+          if (p.mode === 'cash') {
+            player.score += 50;
+            player.wanted = Math.min(5, player.wanted + 1);
+          } else {
+            player.health = Math.min(100, player.health + 25);
+          }
+          p.x = rand(20, 180);
+          p.y = rand(20, 180);
+        }
+      }
+    }
+
+    function updateParticles() {
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i];
+        p.x += p.vx * 0.08;
+        p.y += p.vy * 0.08;
+        p.life -= 1;
+        if (p.life <= 0) particles.splice(i, 1);
+      }
+    }
+
+    function drawGround() {
+      ctx.fillStyle = '#234725';
+      ctx.fillRect(0, innerHeight * world.horizon, innerWidth, innerHeight * 0.68);
+
+      const roadY = innerHeight * world.horizon;
+      const roadH = innerHeight * 0.68;
+      ctx.fillStyle = '#3d3d3d';
+      ctx.fillRect(innerWidth * 0.2, roadY, innerWidth * 0.6, roadH);
+
+      ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([18, 12]);
+      ctx.beginPath();
+      ctx.moveTo(innerWidth * 0.5, roadY);
+      ctx.lineTo(innerWidth * 0.5, roadY + roadH);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      for (let i = 0; i < 25; i++) {
+        const z = i * 12;
+        const p1 = proj(player.x, player.y - z, 0);
+        const p2 = proj(player.x, player.y - z - 8, 0);
+        if (p1.depth > 0 && p2.depth > 0) {
+          ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+          ctx.beginPath();
+          ctx.moveTo(p1.x, p1.y);
+          ctx.lineTo(p2.x, p2.y);
+          ctx.stroke();
+        }
+      }
+    }
+
+    function drawBuildings() {
+      const buildingList = [
+        { x: 30, y: 20, w: 14, h: 18, z: 0 },
+        { x: 44, y: 56, w: 12, h: 26, z: 0 },
+        { x: 76, y: 26, w: 18, h: 14, z: 0 },
+        { x: 112, y: 80, w: 16, h: 18, z: 0 },
+        { x: 144, y: 32, w: 20, h: 22, z: 0 },
+        { x: 170, y: 90, w: 16, h: 15, z: 0 },
+        { x: 30, y: 150, w: 14, h: 18, z: 0 },
+        { x: 92, y: 150, w: 18, h: 24, z: 0 },
+        { x: 145, y: 160, w: 20, h: 18, z: 0 }
+      ];
+
+      const objects = [];
+      for (const b of buildingList) {
+        const p1 = proj(b.x, b.y, 0);
+        const p2 = proj(b.x + b.w, b.y, 0);
+        const p3 = proj(b.x + b.w, b.y + b.h, 0);
+        const p4 = proj(b.x, b.y + b.h, 0);
+        const depth = (p1.depth + p2.depth + p3.depth + p4.depth) / 4;
+        objects.push({ b, p1, p2, p3, p4, depth });
+      }
+
+      objects.sort((a, b) => b.depth - a.depth);
+
+      for (const obj of objects) {
+        const { p1, p2, p3, p4 } = obj;
+        const h = Math.max(10, (p1.scale + p2.scale + p3.scale + p4.scale) / 4 * 0.9);
+        ctx.fillStyle = '#7286a0';
+        ctx.beginPath();
+        ctx.moveTo(p1.x, p1.y);
+        ctx.lineTo(p2.x, p2.y);
+        ctx.lineTo(p3.x, p3.y);
+        ctx.lineTo(p4.x, p4.y);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.fillStyle = 'rgba(255,255,255,0.08)';
+        ctx.fillRect((p1.x + p2.x) / 2 - 10, (p1.y + p4.y) / 2 - h * 0.5, 20, h * 0.7);
+      }
+    }
+
+    function drawObject(x, y, z, size, color, type = 'car') {
+      const p = proj(x, y, z);
+      if (p.depth <= 0) return;
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.scale(p.scale * 0.18, p.scale * 0.18);
+      ctx.fillStyle = color;
+
+      if (type === 'car') {
+        ctx.fillRect(-size, -size * 0.7, size * 2, size * 1.4);
+        ctx.fillStyle = '#1d3557';
+        ctx.fillRect(size * 0.1, -size * 0.3, size * 0.8, size * 0.6);
+      } else {
+        ctx.beginPath();
+        ctx.arc(0, 0, size, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      ctx.restore();
+    }
+
+    function drawPickups() {
+      for (const p of pickups) {
+        const projp = proj(p.x, p.y, 0);
+        if (projp.depth <= 0) continue;
+        ctx.save();
+        ctx.translate(projp.x, projp.y + Math.sin(p.pulse) * 8);
+        ctx.fillStyle = p.mode === 'cash' ? '#ffd166' : '#00e676';
+        ctx.beginPath();
+        ctx.arc(0, 0, 8, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+
+    function drawEnemies() {
+      for (const e of enemies) {
+        drawObject(e.x, e.y, 0, 9, e.color, 'car');
+      }
+    }
+
+    function drawPlayerCar() {
+      ctx.save();
+      const p = proj(player.x, player.y, 0);
+      ctx.translate(p.x, p.y);
+      ctx.rotate(player.angle);
+      ctx.scale(p.scale * 0.18, p.scale * 0.18);
+      ctx.fillStyle = player.flash > 0 ? '#ff5d5d' : '#ffd166';
+      ctx.fillRect(-12, -8, 24, 16);
+      ctx.fillStyle = '#1d3557';
+      ctx.fillRect(2, -3, 8, 6);
+      ctx.restore();
+    }
+
+    function drawParticles() {
+      for (const p of particles) {
+        const q = proj(p.x, p.y, 0);
+        if (q.depth <= 0) continue;
+        ctx.fillStyle = p.color;
+        ctx.globalAlpha = Math.max(0, p.life / 40);
+        ctx.fillRect(q.x, q.y, 4, 4);
+        ctx.globalAlpha = 1;
+      }
+    }
+
+    function drawHUD() {
+      ctx.fillStyle = 'rgba(0,0,0,0.35)';
+      ctx.fillRect(18, innerHeight - 28, 160, 12);
+      ctx.fillStyle = '#ff5d5d';
+      ctx.fillRect(18, innerHeight - 28, 160 * (player.health / 100), 12);
+
+      ctx.fillStyle = '#fff';
+      ctx.font = '14px Arial';
+      ctx.fillText('Heat: ' + player.wanted, 18, innerHeight - 40);
+      ctx.fillText('Cash: $' + player.score, 18, innerHeight - 58);
+      ctx.fillText('Speed: ' + Math.round(Math.abs(player.speed) * 3) + ' mph', 18, innerHeight - 76);
+    }
+
+    function tick() {
+      updatePlayer();
+      updateEnemies();
+      updatePickups();
+      updateParticles();
+
+      if (player.health <= 0) {
+        alert('Busted! Final score: $' + player.score);
+        reset();
+      }
+
+      drawGround();
+      drawBuildings();
+      drawPickups();
+      drawEnemies();
+      drawParticles();
+      drawPlayerCar();
+      drawHUD();
+
+      requestAnimationFrame(tick);
+    }
+
+    requestAnimationFrame(tick);
+  </script>
+</body>
+</html>
